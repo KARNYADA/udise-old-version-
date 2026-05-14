@@ -1,29 +1,4 @@
-/* ============================================================================
- * UDISE+ Promotion Auto-Filler  (v3.0)
- * ----------------------------------------------------------------------------
- * Production-grade browser automation for UDISE+ "Student Movement and
- * Progression" page.
- *
- * v3.0 ke updates:
- *   ✓ FATHER NAME VERIFICATION — naam aur father donon match hone par hi
- *     data fill hoga (galti se bachne ke liye)
- *   ✓ Duplicate name handling — agar 2 students ka same naam hai to father
- *     ke base pe sahi wala pick karega
- *   ✓ Mismatch detection — agar father name match nahi to SKIP (no guessing)
- *   ✓ Smart prefix stripping — "SHRI X" vs "X" ko same maanega
- *   ✓ Decimal percentage support (92.58 etc.) — lenient numeric verification
- *   ✓ "Used CSV row" tracking — ek CSV entry sirf ek student fill karegi
- *   ✓ Match Check ab father verification bhi dikhata hai
- *
- * v2.0 ke features (still intact):
- *   ✓ Teeno dropdowns explicitly select karta hai (Progression, Schooling, Section)
- *   ✓ Pre-flight verification before Update
- *   ✓ Already-Done skip, Pause/Resume/Stop, Draggable panel
- *
- * SAFETY PHILOSOPHY:
- *   "Confusion ho to skip karo, galti mat karo"
- *
- * USAGE:
+/* USAGE:
  *  1. UDISE+ portal login → Student Movement and Progression
  *  2. Class+Section select → "Go" → student list dikhe
  *  3. F12 → Console → ye pura code paste → Enter
