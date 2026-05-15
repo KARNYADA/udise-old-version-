@@ -1,31 +1,69 @@
 /* ============================================================================
- * UDISE+ Promotion Auto-Filler  (v3.1)
+ * UDISE+ Auto Filler — Content Script (v4.1.0)
+ * ============================================================================
+ * Wrapper additions over v4.0:
+ *   ✓ Domain lock (defense in depth — manifest already restricts host)
+ *   ✓ Re-injection safe — second click TOGGLES panel instead of duplicating
+ *   ✓ Clean console namespace (window.__UDISE_FILLER_LOADED__ flag)
+ *
+ * Core v4.0 logic (Excel paste, father verification, sandwich-safe matching,
+ * pause/stop, draggable panel) is byte-for-byte preserved below.
+ * ============================================================================ */
+
+(function UDISEFillerBootstrap() {
+  'use strict';
+
+  /* ----- Hard domain lock — won't run anywhere except UDISE+ ----- */
+  if (location.hostname !== 'sdms.udiseplus.gov.in') {
+    console.warn('[UDISE Filler] Wrong domain — extension only runs on sdms.udiseplus.gov.in');
+    return;
+  }
+
+  /* ----- Re-injection toggle — second toolbar click hides/shows panel ----- */
+  if (window.__UDISE_FILLER_LOADED__) {
+    const existing = document.getElementById('udise-filler-panel');
+    if (existing) {
+      const isHidden = existing.style.display === 'none';
+      existing.style.display = isHidden ? 'flex' : 'none';
+      console.log('[UDISE Filler] Panel ' + (isHidden ? 'shown' : 'hidden'));
+    } else {
+      // Flag set but panel removed by user via DOM — reset and continue to recreate
+      window.__UDISE_FILLER_LOADED__ = false;
+    }
+    if (window.__UDISE_FILLER_LOADED__) return;
+  }
+  window.__UDISE_FILLER_LOADED__ = true;
+
+  /* ============================================================================
+   * BELOW: Original UDISEAutoFiller v4.0 IIFE (UNCHANGED)
+   * ========================================================================== */
+
+/* ============================================================================
+ * UDISE+ Promotion Auto-Filler  (v4.0)
  * ----------------------------------------------------------------------------
  * Production-grade browser automation for UDISE+ "Student Movement and
  * Progression" page.
  *
- * v3.1 ke updates:
- *   ✓ Schooling Status ab dropdown se selectable hai:
- *       • Studying in Same School (default)
- *       • Left School with TC
- *       • Left School without TC
- *   ✓ "Left School" select hone par Section input auto-disable ho jata hai
- *     (UDISE form mein wo case mein section relevant nahi hota)
+ * v4.0 ke NEW updates:
+ *   ✓ EXCEL DIRECT PASTE — Excel se "Select All → Ctrl+C" karke seedhe paste
+ *     karo. Tab-separated automatically detect ho jata hai.
+ *   ✓ FLEXIBLE COLUMN NAMES — "Student_Name", "StudentName", "Name" — sab
+ *     chalega. Same for Father_Name / Father's Name etc.
+ *   ✓ ATTENDANCE "210/217" PARSER — slash format mein hai to attended part
+ *     (210) automatically nikal lega. Plain "210" bhi chalega.
+ *   ✓ ROUNDED-% TOGGLE — default precise (94.75) use hota hai, lekin agar
+ *     "ROUND OF PERCENTAGE" column hai aur toggle ON kiya to round (95) lega.
+ *   ✓ CSV-quoting safe — naam mein comma ho to quote-aware split.
+ *   ✓ Match Check mein ab parsed Attendance & Percentage bhi dikhte hai.
  *
- * v3.0 ke updates:
- *   ✓ FATHER NAME VERIFICATION — naam aur father donon match hone par hi
- *     data fill hoga (galti se bachne ke liye)
- *   ✓ Duplicate name handling — agar 2 students ka same naam hai to father
- *     ke base pe sahi wala pick karega
- *   ✓ Mismatch detection — agar father name match nahi to SKIP (no guessing)
- *   ✓ Smart prefix stripping — "SHRI X" vs "X" ko same maanega
- *   ✓ Decimal percentage support (92.58 etc.) — lenient numeric verification
- *   ✓ "Used CSV row" tracking — ek CSV entry sirf ek student fill karegi
- *   ✓ Match Check ab father verification bhi dikhata hai
+ * v3.0 ke features (intact):
+ *   ✓ Father name verification (naam + father dono match hone pe hi fill)
+ *   ✓ Duplicate name handling, "SHRI X" prefix strip, decimal % support
+ *   ✓ Used-once tracking — ek data row sirf ek student ko
  *
- * v2.0 ke features (still intact):
- *   ✓ Teeno dropdowns explicitly select karta hai (Progression, Schooling, Section)
- *   ✓ Pre-flight verification before Update
+ * v2.0 ke features (intact):
+ *   ✓ Teeno dropdowns explicit select (Progression, Schooling, Section)
+ *   ✓ Pre-flight verification, modal handling, status verify
  *   ✓ Already-Done skip, Pause/Resume/Stop, Draggable panel
  *
  * SAFETY PHILOSOPHY:
@@ -35,7 +73,16 @@
  *  1. UDISE+ portal login → Student Movement and Progression
  *  2. Class+Section select → "Go" → student list dikhe
  *  3. F12 → Console → ye pura code paste → Enter
- *  4. CSV paste → "Load CSV" → "🔍 Match Check" → "▶ Start"
+ *  4. Excel ya CSV paste → "📥 Load Data" → "🔍 Match Check" → "▶ Start"
+ *
+ * SUPPORTED INPUT FORMATS (v4.0):
+ *   • Excel direct paste (Tab-separated):
+ *       Scholar_No  Student_Name      Father_Name         Attendance  percentage
+ *       1118        AASHISH PATHAK    LALIT KUMAR PATHAK  210/217     94.75
+ *   • Standard CSV (comma):
+ *       StudentName,FatherName,Attendance,Percentage
+ *       AASHISH PATHAK,LALIT KUMAR PATHAK,210,94.75
+ *   • Mixed/legacy CSV with extra columns (MarksObtained etc.) — extras ignore
  * ============================================================================ */
 
 (function UDISEAutoFiller() {
@@ -54,6 +101,14 @@
     statusVerifyTimeout:  5000,
     okayWaitTimeout:      3000,
 
+    defaults: {
+      progressionStatusPattern: /Promoted\s*\(?\s*by\s*Examination\s*\)?/i,
+      schoolingStatusPattern:   /Studying\s*in\s*Same\s*School/i,
+      schoolingMode:            'studying-same',   // dropdown se select hota hai
+      section:                  'A',
+      useRoundedPercent:        false,   // toggle from UI
+    },
+
     // Schooling Status presets — UI dropdown se select hota hai
     schoolingPresets: {
       'studying-same': {
@@ -61,32 +116,30 @@
         pattern:      /Studying\s*in\s*Same\s*School/i,
         needsSection: true,
       },
-      'left-with-tc': {
-        label:        'Left School with TC',
-        pattern:      /Left\s*School\s*with\s*TC(?!\s*ertificate)/i,
+      'left-school': {
+        label:        'Left School with TC/without TC',
+        pattern:      /Left\s*School\s*with\s*TC\s*\/\s*without\s*TC/i,
         needsSection: false,
       },
-      'left-without-tc': {
-        label:        'Left School without TC',
-        pattern:      /Left\s*School\s*without\s*TC/i,
-        needsSection: false,
-      },
-    },
-
-    defaults: {
-      progressionStatusPattern: /Promoted\s*\(?\s*by\s*Examination\s*\)?/i,
-      schoolingMode:            'studying-same',  // key into schoolingPresets
-      section:                  'A',
     },
 
     // Father name prefix strip (before comparison)
     fatherPrefixRegex: /^(SHRI|SH\.?|SRI|MR\.?|LATE\.?|LT\.?|S\/O)\s+/i,
-  };
 
-  // Helpers to read current schooling preset
-  const getSchoolingPreset = () =>
-    CFG.schoolingPresets[CFG.defaults.schoolingMode] ||
-    CFG.schoolingPresets['studying-same'];
+    // Flexible column-name aliases (case/space/underscore insensitive)
+    columnAliases: {
+      StudentName:       ['StudentName', 'Student_Name', 'Student Name', 'Name',
+                          'StudentsName', 'Student'],
+      FatherName:        ['FatherName', 'Father_Name', 'Father Name',
+                          "Father's Name", 'FathersName', 'Father'],
+      Attendance:        ['Attendance', 'Days', 'DaysAttended', 'Days_Attended',
+                          'Days Attended', 'AttendedDays', 'PresentDays'],
+      Percentage:        ['Percentage', 'percentage', '%', 'Percent',
+                          'MarksPercentage', 'Marks %', 'Marks%'],
+      PercentageRounded: ['ROUND OF PERCENTAGE', 'RoundOfPercentage',
+                          'Rounded Percentage', 'RoundedPercentage', 'Round %', 'Round%'],
+    },
+  };
 
   /* ------------------------------- STATE --------------------------------- */
   const state = {
@@ -99,6 +152,11 @@
     failures: [],
     csvHasFather: false,
   };
+
+  // Active schooling preset reader
+  const getSchoolingPreset = () =>
+    CFG.schoolingPresets[CFG.defaults.schoolingMode] ||
+    CFG.schoolingPresets['studying-same'];
 
   /* ----------------------------- UTILITIES ------------------------------- */
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -166,24 +224,139 @@
     return Math.abs(na - nb) < 0.01;
   };
 
-  /* --------------------------- CSV PARSING ------------------------------- */
-  const parseCSV = (text) => {
-    const lines = text.trim().split(/\r?\n/).filter(l => l.trim());
-    if (lines.length < 2) throw new Error('CSV mein header + kam se kam 1 row honi chahiye');
+  /* ----------------------- DATA PARSING (v4.0) --------------------------- */
 
-    const headers = lines[0].split(',').map(h => h.trim());
-    const need = ['StudentName', 'Attendance', 'Percentage'];
-    for (const col of need)
-      if (!headers.includes(col)) throw new Error(`Required column missing: "${col}"`);
+  // Build reverse lookup once: normalized header → standard name
+  const buildAliasIndex = () => {
+    const idx = {};
+    const norm = (s) => String(s).toLowerCase().replace(/[\s_'"().]/g, '');
+    for (const [std, aliases] of Object.entries(CFG.columnAliases))
+      for (const a of aliases) idx[norm(a)] = std;
+    return { idx, norm };
+  };
 
-    state.csvHasFather = headers.includes('FatherName');
+  // Detect delimiter: tab > comma > multi-space (regex)
+  const detectDelimiter = (sampleLine) => {
+    const tabs    = (sampleLine.match(/\t/g) || []).length;
+    const commas  = (sampleLine.match(/,/g)  || []).length;
+    if (tabs >= 2 && tabs >= commas) return '\t';
+    if (commas >= 2) return ',';
+    if (/\S\s{2,}\S/.test(sampleLine)) return /\s{2,}/;     // multiple spaces
+    if (tabs >= 1) return '\t';
+    return ',';
+  };
 
-    return lines.slice(1).map((line, i) => {
-      const vals = line.split(',').map(v => v.trim());
-      const row  = { _line: i + 2 };
-      headers.forEach((h, j) => row[h] = vals[j] || '');
-      return row;
+  // Quote-aware split (only used for char delimiters ',' or '\t')
+  const splitWithQuotes = (line, delim) => {
+    const out = [];
+    let buf = '', q = false;
+    for (let i = 0; i < line.length; i++) {
+      const c = line[i];
+      if (c === '"') {
+        if (q && line[i + 1] === '"') { buf += '"'; i++; }
+        else q = !q;
+      } else if (c === delim && !q) {
+        out.push(buf.trim()); buf = '';
+      } else {
+        buf += c;
+      }
+    }
+    out.push(buf.trim());
+    return out;
+  };
+
+  const splitLine = (line, delim) =>
+    delim instanceof RegExp ? line.trim().split(delim) : splitWithQuotes(line, delim);
+
+  // Parse "210/217" → "210"; plain "210" → "210"
+  const parseAttendance = (raw) => {
+    const s = String(raw || '').trim();
+    if (!s) return { attended: '', total: '' };
+    if (s.includes('/')) {
+      const [a, t] = s.split('/').map(p => p.trim());
+      return { attended: a, total: t || '' };
+    }
+    return { attended: s, total: '' };
+  };
+
+  /**
+   * parseSmartData(text) — accepts Excel paste (TSV), CSV, or multi-space.
+   * Returns array of normalized rows: { StudentName, FatherName, Attendance,
+   *                                     Percentage, _line, _raw }
+   * Sets state.csvHasFather and state.parseInfo for UI feedback.
+   */
+  const parseSmartData = (text) => {
+    const lines = text.replace(/\r/g, '').trim().split('\n').filter(l => l.trim());
+    if (lines.length < 2)
+      throw new Error('Header row + kam se kam 1 data row chahiye');
+
+    const delim = detectDelimiter(lines[0]);
+    const { idx: aliasIdx, norm } = buildAliasIndex();
+
+    // Map raw header columns → standard names
+    const rawHeaders = splitLine(lines[0], delim);
+    const colMap = {};   // colIndex → standardName
+    const seen   = new Set();
+    rawHeaders.forEach((h, i) => {
+      const std = aliasIdx[norm(h)];
+      if (std && !seen.has(std)) { colMap[i] = std; seen.add(std); }
     });
+
+    // Validate required columns
+    const detected = new Set(Object.values(colMap));
+    if (!detected.has('StudentName'))
+      throw new Error(`Student name column nahi mila. Mile: [${rawHeaders.join(' | ')}]. ` +
+        `Try: StudentName / Student_Name / Name`);
+    if (!detected.has('Attendance'))
+      throw new Error('Attendance column nahi mila. Try: Attendance / Days / Days Attended');
+    if (!detected.has('Percentage') && !detected.has('PercentageRounded'))
+      throw new Error('Percentage column nahi mila. Try: Percentage / percentage / ROUND OF PERCENTAGE');
+
+    state.csvHasFather = detected.has('FatherName');
+    const useRounded = CFG.defaults.useRoundedPercent && detected.has('PercentageRounded');
+
+    // Parse data rows
+    const rows = [];
+    let skippedEmpty = 0, skippedIncomplete = 0;
+    for (let li = 1; li < lines.length; li++) {
+      const vals = splitLine(lines[li], delim);
+      if (!vals.some(v => v && v.trim())) { skippedEmpty++; continue; }
+
+      const raw = {};
+      for (const [i, std] of Object.entries(colMap)) raw[std] = (vals[+i] || '').trim();
+
+      const att = parseAttendance(raw.Attendance);
+      const pct = useRounded
+        ? (raw.PercentageRounded || raw.Percentage)
+        : (raw.Percentage || raw.PercentageRounded);
+
+      const row = {
+        _line: li + 1,
+        StudentName: raw.StudentName || '',
+        FatherName:  raw.FatherName  || '',
+        Attendance:  att.attended,
+        Percentage:  String(pct || '').trim(),
+        _attendanceRaw: raw.Attendance,
+        _totalDays:    att.total,
+      };
+
+      if (!row.StudentName || !row.Attendance || !row.Percentage) {
+        skippedIncomplete++;
+        continue;
+      }
+      rows.push(row);
+    }
+
+    state.parseInfo = {
+      delim:     delim === '\t' ? 'TAB (Excel)' : (delim === ',' ? 'COMMA (CSV)' : 'multi-space'),
+      headers:   rawHeaders,
+      mapped:    colMap,
+      useRounded,
+      hasRounded: detected.has('PercentageRounded'),
+      hasFather: state.csvHasFather,
+      skippedEmpty, skippedIncomplete,
+    };
+    return rows;
   };
 
   /* --------------------------- DOM HELPERS ------------------------------- */
@@ -240,9 +413,7 @@
       if (!result.progression && opts.some(o => /Promoted.*by.*Examination/i.test(o))) {
         result.progression = sel; continue;
       }
-      if (!result.schooling && opts.some(o =>
-        /Studying.*Same.*School/i.test(o) || /Left\s*School/i.test(o)
-      )) {
+      if (!result.schooling && opts.some(o => /Studying.*Same.*School/i.test(o))) {
         result.schooling = sel; continue;
       }
       if (!result.section && opts.length <= 30 &&
@@ -272,6 +443,24 @@
     Array.from(document.querySelectorAll('button')).find(b => {
       const t = b.textContent.trim();
       return /^(okay|ok)$/i.test(t) && b.offsetParent !== null && !b.disabled;
+    });
+
+  // "Are you sure to update the Student record with Left School with TC/without TC?"
+  // wala confirmation modal — usme "Confirm" button find karta hai
+  const findConfirmModal = () => {
+    const all = document.querySelectorAll('div, p, span, h1, h2, h3, h4');
+    for (const el of all) {
+      const t = (el.textContent || '').trim();
+      if (/are\s*you\s*sure.*update.*student\s*record/i.test(t) &&
+          el.offsetParent !== null) return el;
+    }
+    return null;
+  };
+
+  const findConfirmButton = () =>
+    Array.from(document.querySelectorAll('button')).find(b => {
+      const t = b.textContent.trim();
+      return /^confirm$/i.test(t) && b.offsetParent !== null && !b.disabled;
     });
 
   /* ------------------ MATCHING LOGIC (the brain) ------------------------- */
@@ -343,8 +532,8 @@
     const dd = classifySelects(row);
     if (!dd.progression) throw new Error('Progression Status dropdown nahi mila');
     if (!dd.schooling)   throw new Error('Schooling Status dropdown nahi mila');
-    if (preset.needsSection && !dd.section)
-      throw new Error('Section dropdown nahi mila');
+    // NOTE: Section dropdown ki check yahan nahi karte — wo dynamically appear
+    // hota hai Schooling Status select karne ke baad. Niche handle hoga.
 
     log(`  → Progression Status select...`);
     const progSet = setSelectByText(dd.progression,
@@ -373,13 +562,24 @@
 
     let secPattern = null;
     if (preset.needsSection) {
+      // Schooling Status select hone ke baad section dropdown appear hota hai
+      // (UDISE form dynamically render karta hai). Use dhoondhne ke liye retry.
+      let sectionDD = dd.section;
+      if (!sectionDD) {
+        // 1.5s tak wait karke har 150ms re-classify karte raho
+        sectionDD = await waitFor(() => classifySelects(row).section, 1500, 150);
+      }
+      if (!sectionDD)
+        throw new Error('Section dropdown nahi mila (Schooling Status set karne ke baad bhi). UDISE form mein wo render nahi hua.');
+      dd.section = sectionDD;
+
       log(`  → Section select...`);
       secPattern = new RegExp(`^\\s*${CFG.defaults.section}\\s*$`, 'i');
       const secSet = setSelectByText(dd.section, secPattern, 'Section');
       log(`     ✓ "${secSet}"`);
       await sleep(CFG.delayAfterSelect);
     } else {
-      log(`  → Section skip (Left School mode mein zaroori nahi)`);
+      log(`  → Section skip (Left School option mein section nahi aata)`);
     }
 
     /* ---- PRE-FLIGHT CHECK ---- */
@@ -408,6 +608,19 @@
     log(`  → Update click...`);
     updateBtn.click();
     await sleep(CFG.delayAfterUpdate);
+
+    // Left School mode: Update ke baad pehle "Are you sure..." confirmation modal
+    // aata hai, usme "Confirm" click karna padta hai
+    if (!preset.needsSection) {
+      const confirmModal = await waitFor(findConfirmModal, 4000);
+      if (confirmModal) {
+        const confirmBtn = await waitFor(findConfirmButton, 2000);
+        if (!confirmBtn) throw new Error('Confirm button nahi mila (Left School confirmation modal mein)');
+        log(`  → Confirm click (Left School confirmation)...`);
+        confirmBtn.click();
+        await sleep(CFG.delayAfterUpdate);
+      }
+    }
 
     const modal = await waitFor(findSuccessModal, CFG.modalWaitTimeout);
     if (!modal) throw new Error('Success modal timeout (8s) — validation fail hua ho sakta hai');
@@ -469,7 +682,9 @@
 
       if (result.ok) {
         usedSimulated.add(result.csvRow);
-        willProcess.push(`${name}  (father: ${father || '?'})`);
+        const r = result.csvRow;
+        const attDisplay = r._totalDays ? `${r.Attendance}/${r._totalDays}` : r.Attendance;
+        willProcess.push(`${name}  →  ${r.Percentage}% , ${attDisplay} days  (F: ${father || '?'})`);
       } else {
         skipReasons.push({ name, father: father || '(none)', reason: result.reason, details: result.details });
       }
@@ -523,11 +738,8 @@
     updateUI();
 
     log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'info');
-    const preset = getSchoolingPreset();
     log('🚀 Automation start...', 'info');
-    log(`   Schooling Status: "${preset.label}"`, 'info');
-    if (preset.needsSection)
-      log(`   Section default: "${CFG.defaults.section}"`, 'info');
+    log(`   Section default: "${CFG.defaults.section}"`, 'info');
     log(`   Father verification: ${state.csvHasFather ? 'ON ✓' : 'OFF'}`, 'info');
 
     const rows = findStudentRows();
@@ -700,35 +912,41 @@
       </style>
 
       <div class="uf-header" id="uf-header">
-        <strong>🤖 UDISE+ Auto Filler<span class="uf-ver">v3.1</span></strong>
+        <strong>🤖 UDISE+ Auto Filler<span class="uf-ver">v4.4</span></strong>
         <button class="uf-min" id="uf-min" title="Minimize">─</button>
       </div>
 
       <div class="uf-body" id="uf-body">
         <div class="uf-row">
-          <label class="uf-label">📋 CSV Data</label>
+          <label class="uf-label">📋 Data (Excel paste OR CSV)</label>
           <textarea class="uf-textarea" id="uf-csv" spellcheck="false"
-            placeholder="StudentName,FatherName,Attendance,MarksObtained,TotalMarks,Percentage&#10;ADITYA,SATISH YADAV,204,1111,1200,92.58&#10;AKASH,RAJENDRA PRASAD,194,1092,1200,91.00&#10;..."></textarea>
-          <div class="uf-hint">Required: <b>StudentName, Attendance, Percentage</b> | Optional: <b>FatherName</b> (verify ke liye)</div>
+            placeholder="Excel se Select All → Ctrl+C → yahan paste karo (TAB-separated auto-detect)&#10;&#10;Example (Excel):&#10;Scholar_No  Student_Name      Father_Name         Attendance  percentage&#10;1118        AASHISH PATHAK    LALIT KUMAR PATHAK  210/217     94.75&#10;&#10;Ya CSV (comma):&#10;StudentName,FatherName,Attendance,Percentage&#10;AASHISH PATHAK,LALIT KUMAR PATHAK,210,94.75"></textarea>
+          <div class="uf-hint">
+            Required: <b>Student Name + Attendance + Percentage</b> | Optional: <b>Father Name</b> (verify ke liye)<br>
+            Column naam flexible: <code>Student_Name</code> / <code>StudentName</code> / <code>Name</code> — sab chalega.
+            Attendance <code>"210/217"</code> ya plain <code>"210"</code> dono OK.
+          </div>
         </div>
 
         <div class="uf-config">
           <span><b>Schooling Status:</b></span>
           <select class="uf-input" id="uf-schooling" style="flex: 1; width: auto;">
             <option value="studying-same">Studying in Same School</option>
-            <option value="left-with-tc">Left School with TC</option>
-            <option value="left-without-tc">Left School without TC</option>
+            <option value="left-school">Left School with TC/without TC</option>
           </select>
         </div>
 
         <div class="uf-config">
           <span><b>Promote → Section:</b></span>
           <input type="text" class="uf-input" id="uf-section" value="A" maxlength="3">
-          <span id="uf-section-hint" style="color: #6b7280; font-size: 11px;">(jis section mein bhejna hai)</span>
+          <label style="display:flex; align-items:center; gap:4px; margin-left:auto; cursor:pointer; font-size:11px;">
+            <input type="checkbox" id="uf-rounded" style="margin:0;">
+            Use rounded %
+          </label>
         </div>
 
         <div class="uf-row uf-btns">
-          <button class="uf-btn uf-btn-primary" id="uf-load">📥 Load CSV</button>
+          <button class="uf-btn uf-btn-primary" id="uf-load">📥 Load Data</button>
           <button class="uf-btn uf-btn-info"    id="uf-check" disabled>🔍 Match Check</button>
           <button class="uf-btn uf-btn-success" id="uf-start" disabled>▶ Start</button>
           <button class="uf-btn uf-btn-warn"    id="uf-pause" disabled>⏸ Pause</button>
@@ -750,26 +968,25 @@
     document.body.appendChild(panel);
     makeDraggable(panel.querySelector('#uf-header'), panel);
 
-    const secInput     = document.getElementById('uf-section');
-    const secHint      = document.getElementById('uf-section-hint');
-    const schoolingSel = document.getElementById('uf-schooling');
-
+    const secInput = document.getElementById('uf-section');
     secInput.addEventListener('input', () => {
       CFG.defaults.section = (secInput.value || 'A').trim().toUpperCase();
     });
 
-    const applySchoolingMode = () => {
+    const schoolingSel = document.getElementById('uf-schooling');
+    schoolingSel.addEventListener('change', () => {
       CFG.defaults.schoolingMode = schoolingSel.value;
       const preset = getSchoolingPreset();
-      // Section input disable kar do agar zaroori nahi
       secInput.disabled = !preset.needsSection;
       secInput.style.opacity = preset.needsSection ? '1' : '0.5';
-      secHint.textContent = preset.needsSection
-        ? '(jis section mein bhejna hai)'
-        : '(Left School mode mein section zaroori nahi)';
-      log(`⚙ Schooling Status mode: "${preset.label}"`, 'info');
-    };
-    schoolingSel.addEventListener('change', applySchoolingMode);
+      log(`ℹ Schooling Status mode: "${preset.label}"${preset.needsSection ? '' : ' — section step skip hoga'}`, 'info');
+    });
+
+    const roundedCb = document.getElementById('uf-rounded');
+    roundedCb.addEventListener('change', () => {
+      CFG.defaults.useRoundedPercent = roundedCb.checked;
+      log(`ℹ Rounded % toggle: ${roundedCb.checked ? 'ON' : 'OFF'} — re-load data to apply`, 'info');
+    });
 
     document.getElementById('uf-min').onclick = () =>
       document.getElementById('uf-body').classList.toggle('hidden');
@@ -777,8 +994,10 @@
     document.getElementById('uf-load').onclick = () => {
       try {
         const txt = document.getElementById('uf-csv').value;
-        if (!txt.trim()) throw new Error('CSV khali hai');
-        const data = parseCSV(txt);
+        if (!txt.trim()) throw new Error('Data box khali hai');
+        const data = parseSmartData(txt);
+        if (data.length === 0) throw new Error('Koi valid row nahi mili');
+
         state.studentMap.clear();
         data.forEach(r => {
           const n = normalize(r.StudentName);
@@ -789,13 +1008,25 @@
         const total = countCSVEntries();
         let dupes = 0;
         for (const arr of state.studentMap.values()) if (arr.length > 1) dupes += arr.length;
-        log(`✓ ${total} students CSV se load hue (${state.studentMap.size} unique names)`, 'success');
-        log(`  Father verification: ${state.csvHasFather ? 'ON ✓' : 'OFF — name only'}`, state.csvHasFather ? 'success' : 'warn');
+
+        const info = state.parseInfo;
+        log(`✓ ${total} students load hue (${state.studentMap.size} unique names)`, 'success');
+        log(`  Format detect: ${info.delim}`, 'info');
+        const mappedNames = Object.values(info.mapped).join(', ');
+        log(`  Columns mapped: ${mappedNames}`, 'info');
+        log(`  Father verification: ${info.hasFather ? 'ON ✓' : 'OFF — name only'}`,
+            info.hasFather ? 'success' : 'warn');
+        if (info.hasRounded) {
+          log(`  Percentage source: ${info.useRounded ? 'ROUND OF PERCENTAGE (rounded)' : 'percentage (precise)'}`, 'info');
+        }
+        if (info.skippedEmpty)      log(`  ⚠ ${info.skippedEmpty} empty rows skip kiye`, 'warn');
+        if (info.skippedIncomplete) log(`  ⚠ ${info.skippedIncomplete} incomplete rows skip kiye`, 'warn');
         if (dupes) log(`  ⚠ ${dupes} entries duplicate names mein hai (father se disambiguate honge)`, 'warn');
+
         document.getElementById('uf-start').disabled = false;
         document.getElementById('uf-check').disabled = false;
       } catch (err) {
-        log(`❌ CSV error: ${err.message}`, 'error');
+        log(`❌ Parse error: ${err.message}`, 'error');
       }
     };
 
@@ -873,8 +1104,12 @@
 
   /* -------------------------------- INIT --------------------------------- */
   createUI();
-  log('✓ Tool ready (v3.1 — Schooling Status Selectable)', 'success');
-  log('  Workflow: CSV paste → Load CSV → Match Check → Start', 'info');
-  log('  FatherName column add karo to galti se bachne ke liye', 'info');
+  log('✓ Tool ready (v4.4 — Section dropdown dynamic detection)', 'success');
+  log('  Workflow: Excel/CSV paste → Load Data → Match Check → Start', 'info');
+  log('  Excel: Select All in Excel → Ctrl+C → paste here (TAB auto-detect)', 'info');
+  log('  Father Name column add karo to galti se bachne ke liye', 'info');
 
 })();
+
+
+})(); // end UDISEFillerBootstrap
